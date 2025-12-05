@@ -403,31 +403,26 @@ export interface Material {
 
 /**
  * 获取素材列表
- * @param projectId 项目ID，可选。如果为 'all' 则获取所有素材，如果为 'none' 则获取未关联项目的素材，如果不提供则使用全局接口
- * @param useGlobal 是否使用全局接口（不绑定项目）
+ * @param projectId 项目ID，可选
+ *   - If provided and not 'all' or 'none': Get materials for specific project via /api/projects/{projectId}/materials
+ *   - If 'all': Get all materials via /api/materials?project_id=all
+ *   - If 'none': Get global materials (not bound to any project) via /api/materials?project_id=none
+ *   - If not provided: Get all materials via /api/materials
  */
 export const listMaterials = async (
-  projectId?: string,
-  useGlobal: boolean = false
+  projectId?: string
 ): Promise<ApiResponse<{ materials: Material[]; count: number }>> => {
   let url: string;
   
-  if (useGlobal) {
-    // 使用全局接口
-    if (projectId === 'all' || !projectId) {
-      url = '/api/materials';
-    } else {
-      url = `/api/materials?project_id=${projectId}`;
-    }
+  if (!projectId || projectId === 'all') {
+    // Get all materials using global endpoint
+    url = '/api/materials?project_id=all';
+  } else if (projectId === 'none') {
+    // Get global materials (not bound to any project)
+    url = '/api/materials?project_id=none';
   } else {
-    // 使用项目绑定接口
-    if (projectId === 'all' || !projectId) {
-      url = '/api/projects/all/materials?project_id=all';
-    } else if (projectId === 'none') {
-      url = '/api/projects/all/materials?project_id=none';
-    } else {
-      url = `/api/projects/${projectId}/materials`;
-    }
+    // Get materials for specific project
+    url = `/api/projects/${projectId}/materials`;
   }
   
   const response = await apiClient.get<ApiResponse<{ materials: Material[]; count: number }>>(url);
@@ -437,20 +432,25 @@ export const listMaterials = async (
 /**
  * 上传素材图片
  * @param file 图片文件
- * @param projectId 可选的项目ID，如果不提供或为 'none' 则不关联项目
- * @param useGlobal 是否使用全局接口（不绑定项目）
+ * @param projectId 可选的项目ID
+ *   - If provided: Upload material bound to the project
+ *   - If not provided or 'none': Upload as global material (not bound to any project)
  */
 export const uploadMaterial = async (
   file: File,
-  projectId?: string | null,
-  useGlobal: boolean = false
+  projectId?: string | null
 ): Promise<ApiResponse<Material>> => {
   const formData = new FormData();
   formData.append('file', file);
   
-  const url = useGlobal
-    ? `/api/materials/upload${projectId ? `?project_id=${projectId}` : ''}`
-    : `/api/projects/${projectId || 'none'}/materials/upload${projectId ? '' : '?project_id=none'}`;
+  let url: string;
+  if (!projectId || projectId === 'none') {
+    // Use global upload endpoint for materials not bound to any project
+    url = '/api/materials/upload';
+  } else {
+    // Use project-specific upload endpoint
+    url = `/api/projects/${projectId}/materials/upload`;
+  }
   
   const response = await apiClient.post<ApiResponse<Material>>(url, formData);
   return response.data;

@@ -10,7 +10,6 @@ from werkzeug.utils import secure_filename
 from typing import Optional
 import tempfile
 import shutil
-from PIL import Image
 import time
 
 
@@ -20,8 +19,8 @@ material_global_bp = Blueprint('materials_global', __name__, url_prefix='/api/ma
 ALLOWED_MATERIAL_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
 
 
-def _build_material_query(filter_project_id: str, validate_project: bool = True):
-    """Build common material query with optional project validation."""
+def _build_material_query(filter_project_id: str):
+    """Build common material query with project validation."""
     query = Material.query
 
     if filter_project_id == 'all':
@@ -29,12 +28,49 @@ def _build_material_query(filter_project_id: str, validate_project: bool = True)
     if filter_project_id == 'none':
         return query.filter(Material.project_id.is_(None)), None
 
-    if validate_project:
-        project = Project.query.get(filter_project_id)
-        if not project:
-            return None, not_found('Project')
+    project = Project.query.get(filter_project_id)
+    if not project:
+        return None, not_found('Project')
 
     return query.filter(Material.project_id == filter_project_id), None
+
+
+def _get_materials_list(filter_project_id: str):
+    """
+    Common logic to get materials list.
+    Returns (materials_list, error_response)
+    """
+    query, error = _build_material_query(filter_project_id)
+    if error:
+        return None, error
+    
+    materials = query.order_by(Material.created_at.desc()).all()
+    materials_list = [material.to_dict() for material in materials]
+    
+    return materials_list, None
+
+
+def _handle_material_upload(default_project_id: Optional[str] = None):
+    """
+    Common logic to handle material upload.
+    Returns Flask response object.
+    """
+    try:
+        raw_project_id = request.args.get('project_id', default_project_id)
+        target_project_id, error = _resolve_target_project_id(raw_project_id)
+        if error:
+            return error
+
+        file = request.files.get('file')
+        material, error = _save_material_file(file, target_project_id)
+        if error:
+            return error
+
+        return success_response(material.to_dict(), status_code=201)
+    
+    except Exception as e:
+        db.session.rollback()
+        return error_response('SERVER_ERROR', str(e), 500)
 
 
 def _resolve_target_project_id(raw_project_id: Optional[str], allow_none: bool = True):
@@ -107,17 +143,17 @@ def generate_material_image(project_id):
     """
     POST /api/projects/{project_id}/materials/generate - Generate a standalone material image
 
-    支持 multipart/form-data：
-    - prompt: 文生图提示词（将被直接传给模型，不做任何修饰）
-    - ref_image: 主参考图（可选）
-    - extra_images: 额外参考图（可多文件，可选）
+    Supports multipart/form-data:
+    - prompt: Text-to-image prompt (passed directly to the model without modification)
+    - ref_image: Main reference image (optional)
+    - extra_images: Additional reference images (multiple files, optional)
     """
     try:
         project = Project.query.get(project_id)
         if not project:
             return not_found('Project')
 
-        # 解析请求数据（优先支持 multipart，用于文件上传）
+        # Parse request data (prioritize multipart for file uploads)
         if request.is_json:
             data = request.get_json() or {}
             prompt = data.get('prompt', '').strip()
@@ -127,13 +163,12 @@ def generate_material_image(project_id):
             data = request.form.to_dict()
             prompt = (data.get('prompt') or '').strip()
             ref_file = request.files.get('ref_image')
-            # 支持多张额外参考图
             extra_files = request.files.getlist('extra_images') or []
 
         if not prompt:
             return bad_request("prompt is required")
 
-        # 初始化服务
+        # Initialize services
         ai_service = AIService(
             current_app.config['GOOGLE_API_KEY'],
             current_app.config['GOOGLE_API_BASE']
@@ -144,13 +179,13 @@ def generate_material_image(project_id):
 
         try:
             ref_path = None
-            # 如果提供了主参考图，则保存到临时目录
+            # Save main reference image to temp directory if provided
             if ref_file and ref_file.filename:
                 ref_filename = secure_filename(ref_file.filename or 'ref.png')
                 ref_path = temp_dir / ref_filename
                 ref_file.save(str(ref_path))
 
-            # 保存额外参考图到临时目录
+            # Save additional reference images to temp directory
             additional_ref_images = []
             for extra in extra_files:
                 if not extra or not extra.filename:
@@ -160,7 +195,7 @@ def generate_material_image(project_id):
                 extra.save(str(extra_path))
                 additional_ref_images.append(str(extra_path))
 
-            # 使用用户原始 prompt 直接调用文生图模型（主参考图可选）
+            # Call text-to-image model with user's original prompt
             image = ai_service.generate_image(
                 prompt=prompt,
                 ref_image_path=str(ref_path) if ref_path else None,
@@ -172,17 +207,15 @@ def generate_material_image(project_id):
             if not image:
                 return error_response('AI_SERVICE_ERROR', 'Failed to generate image', 503)
 
-            # 保存生成的素材图片
+            # Save generated material image
             relative_path = file_service.save_material_image(image, project_id)
-            # relative_path 形如 "<project_id>/materials/xxx.png"
             relative = Path(relative_path)
-            # materials 目录下的文件名
             filename = relative.name
 
-            # 构造前端可访问的 URL
+            # Construct frontend-accessible URL
             image_url = file_service.get_file_url(project_id, 'materials', filename)
 
-            # 保存素材信息到数据库
+            # Save material info to database
             material = Material(
                 project_id=project_id,
                 filename=filename,
@@ -190,9 +223,6 @@ def generate_material_image(project_id):
                 url=image_url
             )
             db.session.add(material)
-            
-            # 不改变项目结构，仅更新时间以便前端刷新
-            project.updated_at = project.updated_at  # 不强制变更，仅保持兼容
             db.session.commit()
 
             return success_response({
@@ -201,7 +231,7 @@ def generate_material_image(project_id):
                 "material_id": material.id,
             })
         finally:
-            # 清理临时目录
+            # Clean up temp directory
             if temp_dir.exists():
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -213,26 +243,15 @@ def generate_material_image(project_id):
 @material_bp.route('/<project_id>/materials', methods=['GET'])
 def list_materials(project_id):
     """
-    GET /api/projects/{project_id}/materials - List materials
-    
-    Query params:
-        - project_id: Optional filter by project_id (can be 'all' to get all materials, 'none' to get materials without project)
+    GET /api/projects/{project_id}/materials - List materials for a specific project
     
     Returns:
-        List of material images with filename, url, and metadata
+        List of material images with filename, url, and metadata for the specified project
     """
     try:
-        # 支持查询参数来筛选项目
-        filter_project_id = request.args.get('project_id', project_id)
-        
-        query, error = _build_material_query(filter_project_id, validate_project=True)
+        materials_list, error = _get_materials_list(project_id)
         if error:
             return error
-
-        materials = query.order_by(Material.created_at.desc()).all()
-        
-        # 转换为字典格式
-        materials_list = [material.to_dict() for material in materials]
         
         return success_response({
             "materials": materials_list,
@@ -248,55 +267,35 @@ def upload_material(project_id):
     """
     POST /api/projects/{project_id}/materials/upload - Upload a material image
     
-    支持 multipart/form-data：
-    - file: 图片文件（必需）
-    - project_id: 可选的查询参数，如果不提供则使用路径中的 project_id，如果为 'none' 则不关联项目
+    Supports multipart/form-data:
+    - file: Image file (required)
+    - project_id: Optional query parameter, defaults to path parameter if not provided
     
     Returns:
         Material info with filename, url, and metadata
     """
-    try:
-        # 支持通过查询参数指定 project_id，如果为 'none' 则不关联项目
-        raw_project_id = request.args.get('project_id', project_id)
-        target_project_id, error = _resolve_target_project_id(raw_project_id)
-        if error:
-            return error
-
-        file = request.files.get('file')
-        material, error = _save_material_file(file, target_project_id)
-        if error:
-            return error
-
-        return success_response(material.to_dict(), status_code=201)
-    
-    except Exception as e:
-        db.session.rollback()
-        return error_response('SERVER_ERROR', str(e), 500)
+    return _handle_material_upload(default_project_id=project_id)
 
 
 @material_global_bp.route('', methods=['GET'])
 def list_all_materials():
     """
-    GET /api/materials - List all materials (global, not bound to a project)
+    GET /api/materials - Global materials endpoint for complex queries
     
     Query params:
-        - project_id: Optional filter by project_id (can be 'all' to get all materials, 'none' to get materials without project)
+        - project_id: Filter by project_id
+          * 'all' (default): Get all materials regardless of project
+          * 'none': Get only materials without a project (global materials)
+          * <project_id>: Get materials for specific project
     
     Returns:
         List of material images with filename, url, and metadata
     """
     try:
-        # 支持查询参数来筛选项目
         filter_project_id = request.args.get('project_id', 'all')
-        
-        query, error = _build_material_query(filter_project_id, validate_project=True)
+        materials_list, error = _get_materials_list(filter_project_id)
         if error:
             return error
-        
-        materials = query.order_by(Material.created_at.desc()).all()
-        
-        # 转换为字典格式
-        materials_list = [material.to_dict() for material in materials]
         
         return success_response({
             "materials": materials_list,
@@ -312,30 +311,14 @@ def upload_material_global():
     """
     POST /api/materials/upload - Upload a material image (global, not bound to a project)
     
-    支持 multipart/form-data：
-    - file: 图片文件（必需）
-    - project_id: 可选的查询参数，如果提供则关联到项目，如果不提供或为 'none' 则不关联项目
+    Supports multipart/form-data:
+    - file: Image file (required)
+    - project_id: Optional query parameter to associate with a project
     
     Returns:
         Material info with filename, url, and metadata
     """
-    try:
-        # 支持通过查询参数指定 project_id，如果为 'none' 或不提供则不关联项目
-        raw_project_id = request.args.get('project_id')
-        target_project_id, error = _resolve_target_project_id(raw_project_id)
-        if error:
-            return error
-
-        file = request.files.get('file')
-        material, error = _save_material_file(file, target_project_id)
-        if error:
-            return error
-
-        return success_response(material.to_dict(), status_code=201)
-    
-    except Exception as e:
-        db.session.rollback()
-        return error_response('SERVER_ERROR', str(e), 500)
+    return _handle_material_upload(default_project_id=None)
 
 
 @material_global_bp.route('/<material_id>', methods=['DELETE'])
@@ -351,12 +334,13 @@ def delete_material(material_id):
         file_service = FileService(current_app.config['UPLOAD_FOLDER'])
         material_path = Path(file_service.get_absolute_path(material.relative_path))
 
-        # 删除文件（若存在）
-        if material_path.exists():
-            material_path.unlink(missing_ok=True)
-
+        # First, commit the deletion from the database to ensure data consistency
         db.session.delete(material)
         db.session.commit()
+
+        # Then, delete the file from the filesystem
+        if material_path.exists():
+            material_path.unlink(missing_ok=True)
 
         return success_response({"id": material_id})
     except Exception as e:

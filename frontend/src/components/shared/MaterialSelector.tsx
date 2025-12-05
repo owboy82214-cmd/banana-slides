@@ -87,10 +87,7 @@ export const MaterialSelector: React.FC<MaterialSelectorProps> = ({
     try {
       // 如果 filterProjectId 是 'all'，传递 'all'；如果是 'none'，传递 'none'；否则传递实际的项目ID
       const targetProjectId = filterProjectId === 'all' ? 'all' : filterProjectId === 'none' ? 'none' : filterProjectId;
-      const response = await listMaterials(
-        targetProjectId,
-        !projectId // 如果没有传入 projectId，使用全局接口
-      );
+      const response = await listMaterials(targetProjectId);
       if (response.data?.materials) {
         setMaterials(response.data.materials);
       }
@@ -163,8 +160,7 @@ export const MaterialSelector: React.FC<MaterialSelectorProps> = ({
 
       const response = await uploadMaterial(
         file,
-        targetProjectId,
-        !projectId // 如果没有传入 projectId，使用全局接口
+        targetProjectId
       );
       
       if (response.data) {
