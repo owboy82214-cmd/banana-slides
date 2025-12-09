@@ -1,0 +1,30 @@
+# Dockerfile.backend
+FROM python:3.10-slim
+
+# 安裝基本工具
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安裝 uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+WORKDIR /app
+
+# 1. 先複製依賴描述檔 (從根目錄複製)
+COPY pyproject.toml uv.lock ./
+
+# 2. 安裝依賴 (這一步最重要，之前就是這裡失敗)
+RUN uv sync --frozen
+
+# 3. 複製後端程式碼 (從 backend 資料夾複製到容器內)
+COPY backend/ .
+
+# 設定環境變數
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PORT=5000
+
+# 啟動
+EXPOSE 5000
+CMD ["uv", "run", "python", "app.py"]
